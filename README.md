@@ -114,14 +114,26 @@ gojq: invalid json: <stdin>
 jqlm is a fork — install it by building from source (there are no package-manager
 packages yet; upstream gojq packages install gojq, *not* jqlm):
 
-### Build from source
+### Build and install
+
 ```sh
-git clone https://github.com/WillChangeThisLater/jqlm
-cd jqlm
+git clone git@github.com:WillChangeThisLater/jqlm.git ~/repos/jqlm
+cd ~/repos/jqlm
+
 go build -o jqlm ./cmd/gojq
+
+# put it on PATH (re-run the ln after rebuilding):
+ln -sf ~/repos/jqlm/jqlm ~/.local/bin/jqlm
+
+jqlm --version
 ```
-(the source dir is still `cmd/gojq` to minimize fork drift; name the binary
-whatever you like)
+
+Notes:
+- the source dir is still `cmd/gojq` to minimize fork drift; the `-o` flag names
+  the binary whatever you like
+- after pulling changes, rebuild: `cd ~/repos/jqlm && go build -o jqlm ./cmd/gojq`
+- requires Go 1.24+; no external dependencies beyond Go modules
+- the compiled binary links the llm builtins — verify with `jqlm --help | grep llm`
 
 ### Docker (upstream gojq image — jq-compatible, but no LLM builtins)
 ```sh
