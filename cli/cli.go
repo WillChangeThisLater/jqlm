@@ -54,6 +54,11 @@ type cli struct {
 	exitCodeError       error
 
 	llmConcurrency int
+
+	llmFlagProvider    string
+	llmFlagModel       string
+	llmFlagProviderSet bool
+	llmFlagModelSet    bool
 }
 
 type flagopts struct {
@@ -81,6 +86,8 @@ type flagopts struct {
 	JSONArgs       []any             `long:"jsonargs" positional:"" description:"consume remaining arguments as positional JSON values"`
 	ExitStatus     bool              `short:"e" long:"exit-status" description:"exit 1 when the last value is false or null"`
 	LLMConcurrency *int              `long:"llm-concurrency" args:"n" description:"process input values in parallel (results still print in input order)"`
+	LLMProvider    string            `long:"llm-provider" description:"LLM provider: openai|openrouter|llama|openai-compat (overrides JQLM_PROVIDER)"`
+	LLMModel       string            `long:"llm-model" args:"id" description:"LLM model id (overrides JQLM_MODEL; e.g. gpt-4o-mini, z-ai/glm-5.3-flash, a gguf name)"`
 	Version        bool              `short:"v" long:"version" description:"display version information"`
 	Help           bool              `short:"h" long:"help" description:"display this help information"`
 }
@@ -118,7 +125,7 @@ Synopsis:
 Usage:
   %[1]s [OPTIONS]
 
-LLM configuration (env):
+LLM configuration (--llm-provider/--llm-model flags, or env):
   JQLM_PROVIDER      openai | openrouter | llama | openai-compat (default: openai)
   JQLM_MODEL         model id (default: gpt-4o-mini for openai; required for others,
                      e.g. z-ai/glm-5.3-flash for openrouter, a gguf name for llama)
@@ -149,6 +156,8 @@ Examples:
 		opts.OutputRaw, opts.OutputRaw0, opts.OutputJoin,
 		opts.OutputCompact, opts.OutputIndent, opts.OutputTab, opts.OutputYAML
 	cli.llmConcurrency = 1
+	llmFlagProvider, llmFlagModel = opts.LLMProvider, opts.LLMModel
+	llmFlagProviderSet, llmFlagModelSet = opts.LLMProvider != "", opts.LLMModel != ""
 	if opts.LLMConcurrency != nil {
 		cli.llmConcurrency = *opts.LLMConcurrency
 	} else if s := os.Getenv("JQLM_CONCURRENCY"); s != "" {

@@ -105,13 +105,25 @@ var (
 	llmErr    error
 )
 
+// llmFlagProvider/llmFlagModel are set by the CLI flags before the decider
+// is lazily constructed; they take precedence over the env vars.
+var (
+	llmFlagProvider    string
+	llmFlagModel       string
+	llmFlagProviderSet bool
+	llmFlagModelSet    bool
+)
+
 func getDecider() (*llmDecider, error) {
 	llmOnce.Do(func() { llmShared, llmErr = newLLMDecider() })
 	return llmShared, llmErr
 }
 
 func newLLMDecider() (*llmDecider, error) {
-	name := os.Getenv("JQLM_PROVIDER")
+	name := llmFlagProvider
+	if !llmFlagProviderSet {
+		name = os.Getenv("JQLM_PROVIDER")
+	}
 	if name == "" {
 		name = "openai"
 	}
@@ -131,7 +143,10 @@ func newLLMDecider() (*llmDecider, error) {
 		key = "no-key-needed" // llama-server ignores auth
 	}
 
-	model := os.Getenv("JQLM_MODEL")
+	model := llmFlagModel
+	if !llmFlagModelSet {
+		model = os.Getenv("JQLM_MODEL")
+	}
 	if model == "" {
 		model = spec.defaultModel
 	}

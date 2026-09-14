@@ -7,6 +7,10 @@ applies; there are just two extra builtins:
 
 ```sh
  $ cat reviews.json | JQLM_PROVIDER=openrouter JQLM_MODEL=z-ai/glm-5.3-flash jqlm '.[] | select(llm_select(. ; "only keep reviews where the reviewer really did not like the food"))'
+
+ # or with flags instead of env:
+ $ cat reviews.json | jqlm --llm-provider openrouter --llm-model z-ai/glm-5.3-flash \
+     '.[] | select(llm_select(. ; "only keep negative reviews"))'
 ```
 
 ## LLM builtins
@@ -30,6 +34,8 @@ Other env: `JQLM_MODEL`, `JQLM_BASE_URL`, `JQLM_MODE` (`json`|`json-schema`|`too
 `JQLM_TIMEOUT` (per-call, default per provider), `JQLM_MAX_RETRIES` (default 3),
 `JQLM_MAX_ITEM_BYTES` (client-side size guard; discard oversized items without
 calling the provider, since some providers silently truncate them).
+CLI flags `--llm-provider` and `--llm-model` override the corresponding env
+vars (flags > env > provider default).
 CLI flag `--llm-concurrency N` (or env `JQLM_CONCURRENCY`) processes input
 values in parallel while printing results in input order.
 
