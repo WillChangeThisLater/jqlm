@@ -14,7 +14,7 @@ import (
 	"github.com/itchyny/gojq"
 )
 
-const name = "gojq"
+const name = "jqlm"
 
 const version = "0.12.19"
 
@@ -84,6 +84,7 @@ type flagopts struct {
 var addDefaultModulePaths = true
 
 func (cli *cli) run(args []string) int {
+	defer llmSummaryWarn()
 	if err := cli.runInternal(args); err != nil {
 		if _, ok := err.(interface{ isEmptyError() }); !ok {
 			fmt.Fprintf(cli.errStream, "%s: %s\n", name, err)
@@ -244,6 +245,8 @@ Usage:
 		gojq.WithVariables(cli.argnames),
 		gojq.WithFunction("debug", 0, 0, cli.funcDebug),
 		gojq.WithFunction("stderr", 0, 0, cli.funcStderr),
+		gojq.WithFunction("llm_select", 2, 2, llmSelectFunc),
+		gojq.WithFunction("llm_judge", 2, 2, llmJudgeFunc),
 		gojq.WithFunction("input_filename", 0, 0,
 			func(iter inputIter) func(any, []any) any {
 				return func(any, []any) any {

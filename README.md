@@ -1,10 +1,44 @@
-# gojq
-[![CI Status](https://github.com/itchyny/gojq/actions/workflows/ci.yaml/badge.svg?branch=main)](https://github.com/itchyny/gojq/actions/workflows/ci.yaml?query=branch%3Amain)
-[![MIT License](https://img.shields.io/badge/license-MIT-blue.svg)](https://github.com/itchyny/gojq/blob/main/LICENSE)
-[![release](https://img.shields.io/github/release/itchyny/gojq/all.svg)](https://github.com/itchyny/gojq/releases)
-[![pkg.go.dev](https://pkg.go.dev/badge/github.com/itchyny/gojq)](https://pkg.go.dev/github.com/itchyny/gojq)
+# jqlm
 
-### Pure Go implementation of [jq](https://github.com/jqlang/jq)
+**jqlm is [gojq](https://github.com/itchyny/gojq) — which is a pure-Go,
+bug-for-bug implementation of [jq](https://github.com/jqlang/jq) — with LLM
+filtering built in as native functions.** Everything about jq you know still
+applies; there are just two extra builtins:
+
+```sh
+ $ cat reviews.json | JQLM_PROVIDER=openrouter JQLM_MODEL=z-ai/glm-5.3-flash jqlm '.[] | select(llm_select(. ; "only keep reviews where the reviewer really did not like the food"))'
+```
+
+## LLM builtins
+
+- `llm_select(value; prompt)` → boolean. Sends one request per item to an
+  OpenAI-compatible chat endpoint; `true` = keep. Failed calls **fail open**:
+  the item is discarded, a warning goes to stderr, and the run continues.
+- `llm_judge(value; prompt)` → `{keep: boolean, reason: string}`. Same, but
+  keeps the model's explanation.
+
+### Providers (env-only config)
+
+| `JQLM_PROVIDER` | key env | default base URL | notes |
+|---|---|---|---|
+| `openai` (default) | `OPENAI_API_KEY` | api.openai.com/v1 | default model `gpt-4o-mini` |
+| `openrouter` | `OPENROUTER_API_KEY` | openrouter.ai/api/v1 | any model id via `JQLM_MODEL` |
+| `llama` | — | `http://localhost:8080/v1` | llama.cpp `llama-server`; grammar-constrained JSON output |
+| `openai-compat` | `JQLM_API_KEY` | — | needs `JQLM_BASE_URL` + `JQLM_MODEL` (Ollama, vLLM, LM Studio, Groq, …) |
+
+Other env: `JQLM_MODEL`, `JQLM_BASE_URL`, `JQLM_MODE` (`json`|`json-schema`|`tool`),
+`JQLM_TIMEOUT` (per-call, default per provider), `JQLM_MAX_RETRIES` (default 3),
+`JQLM_MAX_ITEM_BYTES` (client-side size guard; discard oversized items without
+calling the provider, since some providers silently truncate them).
+
+See [PROOF.md](PROOF.md) for captured end-to-end runs across providers,
+scaling, and failure modes.
+
+---
+
+## Upstream gojq README
+
+### Pure Go implementation of jq
 This is an implementation of jq command written in Go language.
 You can also embed gojq as a library to your Go products.
 
