@@ -134,7 +134,10 @@ func llmLoadConfig() *llmConfig {
 
 type llmDecision struct {
 	Explanation string `json:"explanation,omitempty" jsonschema:"title=explanation,description=Short explanation for why this item should be kept or discarded"`
-	ShouldKeep  bool   `json:"shouldkeep" jsonschema:"title=shouldkeep,description=Return true if we should keep the item, false if we should discard"`
+	// pointer: a model response that OMITS shouldkeep (or sends null) must not
+	// silently decode to false — that would discard the item with a plausible
+	// explanation and zero failure signal. nil = invalid response → retry.
+	ShouldKeep *bool `json:"shouldkeep" jsonschema:"title=shouldkeep,description=Return true if we should keep the item, false if we should discard"`
 }
 
 type llmDecider struct {
@@ -255,7 +258,8 @@ func newLLMDecider() (*llmDecider, error) {
 		timeout = d
 	}
 
-	maxItemBytes := 0
+	maxItemBytes := 1 << 20 // 1MB default: protects local servers from
+	// context-window-sized requests that can crash them; 0 (or config) disables
 	if cfg != nil && cfg.MaxItemBytes != nil {
 		maxItemBytes = *cfg.MaxItemBytes
 	}
@@ -330,7 +334,14 @@ func (d *llmDecider) decide(value, prompt any) (keep bool, reason string, err er
 		}, &out)
 		cancel()
 		if err == nil {
-			return out.ShouldKeep, out.Explanation, nil
+			if out.ShouldKeep == nil {
+				// valid JSON but no verdict: treat as a failed call so it
+				// retries and, ultimately, is counted — never a silent discard
+				err = errors.New("response omitted required field 'shouldkeep'")
+			}
+		}
+		if err == nil {
+			return *out.ShouldKeep, out.Explanation, nil
 		}
 		lastErr = err
 		if llmRetryable(err) {
@@ -347,12 +358,17 @@ func (d *llmDecider) decide(value, prompt any) (keep bool, reason string, err er
 }
 
 func llmRetryable(err error) bool {
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return false // spent budget / canceled: retrying with a fresh timeout would double it
+	}
 	var apiErr *openai.APIError
 	if errors.As(err, &apiErr) {
 		return apiErr.HTTPStatusCode == http.StatusTooManyRequests ||
 			(apiErr.HTTPStatusCode >= 500 && apiErr.HTTPStatusCode < 600)
 	}
-	return false
+	// transport-level failures (EOF, connection reset, refused): retry —
+	// local servers occasionally drop idle or overloaded connections
+	return true
 }
 
 func llmErrorSummary(err error) string {
@@ -366,7 +382,13 @@ func llmErrorSummary(err error) string {
 		}
 		return fmt.Sprintf("api %d: %s", apiErr.HTTPStatusCode, apiErr.Message)
 	}
-	return err.Error()
+	msg := err.Error()
+	// llama.cpp and other local servers often drop the connection (EOF/reset)
+	// instead of returning a 400 when the input exceeds the context window
+	if strings.Contains(msg, "EOF") || strings.Contains(msg, "connection reset") {
+		return msg + " (provider dropped connection; often means input too large for model context)"
+	}
+	return msg
 }
 
 func llmWarnf(format string, args ...any) {
