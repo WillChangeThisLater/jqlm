@@ -81,6 +81,13 @@ scaling, and failure modes.
 
 ---
 
+## For AI agents
+
+This repo bundles a pi-agent skill describing jqlm's capabilities and the
+HAR-recon workflow: see [`skill/SKILL.md`](skill/SKILL.md) (helpers in
+[`skill/scripts/`](skill/scripts/)). It is symlinked into
+`~/.pi/agent/skills/agent-generated/jqlm` on machines using this repo.
+
 ## Upstream gojq README
 
 ### Pure Go implementation of jq
