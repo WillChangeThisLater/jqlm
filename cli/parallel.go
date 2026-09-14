@@ -14,7 +14,7 @@ import (
 
 	"sync"
 
-	"github.com/itchyny/gojq"
+	"github.com/WillChangeThisLater/jqlm"
 )
 
 type parallelItem struct {

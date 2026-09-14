@@ -1,4 +1,4 @@
-module github.com/itchyny/gojq
+module github.com/WillChangeThisLater/jqlm
 
 go 1.24.0
 

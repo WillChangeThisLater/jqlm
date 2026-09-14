@@ -7,7 +7,7 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/itchyny/gojq"
+	"github.com/WillChangeThisLater/jqlm"
 )
 
 func TestWithModuleLoaderError(t *testing.T) {

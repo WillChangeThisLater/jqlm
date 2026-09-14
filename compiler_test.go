@@ -12,7 +12,7 @@ import (
 	"time"
 	"unsafe"
 
-	"github.com/itchyny/gojq"
+	"github.com/WillChangeThisLater/jqlm"
 )
 
 func ExampleCompile() {

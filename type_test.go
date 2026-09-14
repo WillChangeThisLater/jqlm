@@ -7,7 +7,7 @@ import (
 	"math/big"
 	"testing"
 
-	"github.com/itchyny/gojq"
+	"github.com/WillChangeThisLater/jqlm"
 )
 
 func TestTypeOf(t *testing.T) {

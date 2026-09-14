@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"log"
 
-	"github.com/itchyny/gojq"
+	"github.com/WillChangeThisLater/jqlm"
 )
 
 func ExampleWithVariables() {
