@@ -118,6 +118,23 @@ Synopsis:
 Usage:
   %[1]s [OPTIONS]
 
+LLM configuration (env):
+  JQLM_PROVIDER      openai | openrouter | llama | openai-compat (default: openai)
+  JQLM_MODEL         model id (default: gpt-4o-mini for openai; required for others,
+                     e.g. z-ai/glm-5.3-flash for openrouter, a gguf name for llama)
+  JQLM_BASE_URL      API base URL override (required for openai-compat)
+  JQLM_TIMEOUT       per-call timeout, e.g. 30s (default: per provider)
+  JQLM_CONCURRENCY   same as --llm-concurrency
+  JQLM_MAX_RETRIES   retries per llm call (default 3)
+  JQLM_MAX_ITEM_BYTES  skip items larger than this many bytes without calling the provider
+
+Examples:
+  %% cat reviews.json | %[1]s 'select(llm_select(. ; "keep the negative reviews"))'
+  %% JQLM_PROVIDER=openrouter JQLM_MODEL=z-ai/glm-5.3-flash cat reviews.json | %[1]s --llm-concurrency 10 'select(llm_select(. ; "..."))'
+  %% JQLM_PROVIDER=llama JQLM_MODEL=Qwen3.5-9B-Q8_0.gguf cat reviews.json | %[1]s 'select(llm_select(. ; "..."))'
+  API keys: OPENAI_API_KEY (openai), OPENROUTER_API_KEY (openrouter),
+  JQLM_API_KEY (openai-compat); llama needs no key.
+
 `,
 			name, version, revision, runtime.Version())
 		fmt.Fprintln(cli.outStream, formatFlags(&opts))
