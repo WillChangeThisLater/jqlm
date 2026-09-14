@@ -59,7 +59,7 @@ $ JQLM_PROVIDER=openrouter JQLM_MODEL=z-ai/glm-5.3-flash \
 {"keep":true,"reason":"This is clearly a positive pizza review: the reviewer calls it 'The best pizza I've ever had!', praises the 'Perfectly crispy crust', gives a 'Highly recommend!' endorsement, and awards 5 stars."}
 ```
 
-## 5. OpenAI back-compat: no env, behaves like the old jqllm default
+## 5. OpenAI back-compat: no env needed (default provider)
 
 ```
 $ jqlm -c '.[] | select(llm_select(. ; "keep only 5-star reviews")) | .reviewer' < reviews.json
