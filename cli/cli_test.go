@@ -45,6 +45,11 @@ func TestCliRun(t *testing.T) {
 	if err := os.Setenv("GOJQ_COLORS", ""); err != nil {
 		t.Fatal(err)
 	}
+	// hermetic LLM config: a real ~/.config/jqlm/config.yaml would otherwise
+	// leak into tests (e.g. enabling parallel processing via `concurrency`)
+	if err := os.Setenv("XDG_CONFIG_HOME", t.TempDir()); err != nil {
+		t.Fatal(err)
+	}
 	f, err := os.Open("test.yaml")
 	if err != nil {
 		t.Fatal(err)

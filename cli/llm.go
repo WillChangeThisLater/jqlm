@@ -32,6 +32,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -40,6 +41,7 @@ import (
 
 	instructor "github.com/instructor-ai/instructor-go/pkg/instructor"
 	openai "github.com/sashabaranov/go-openai"
+	"gopkg.in/yaml.v3"
 )
 
 // ---------------------------------------------------------------- providers --
@@ -81,6 +83,53 @@ var llmProviders = map[string]llmProviderSpec{
 	},
 }
 
+// ---------------------------------------------------------------- config ----
+
+// llmConfig is the optional config file (~/.config/jqlm/config.yaml).
+// Every key is optional. Precedence: CLI flags > env vars > config file >
+// per-provider defaults.
+type llmConfig struct {
+	Provider     string `yaml:"provider"`
+	Model        string `yaml:"model"`
+	BaseURL      string `yaml:"base_url"`
+	Mode         string `yaml:"mode"`
+	Timeout      string `yaml:"timeout"`
+	MaxRetries   *int   `yaml:"max_retries"`
+	MaxItemBytes *int   `yaml:"max_item_bytes"`
+	Concurrency  *int   `yaml:"concurrency"`
+}
+
+var (
+	configOnce sync.Once
+	configFile *llmConfig
+)
+
+func llmLoadConfig() *llmConfig {
+	configOnce.Do(func() {
+		paths := []string{}
+		if x := os.Getenv("XDG_CONFIG_HOME"); x != "" {
+			// XDG spec: when set, it replaces ~/.config entirely
+			paths = append(paths, filepath.Join(x, "jqlm", "config.yaml"))
+		} else if home, err := os.UserHomeDir(); err == nil {
+			paths = append(paths, filepath.Join(home, ".config", "jqlm", "config.yaml"))
+		}
+		for _, p := range paths {
+			b, err := os.ReadFile(p)
+			if err != nil {
+				continue
+			}
+			var c llmConfig
+			if err := yaml.Unmarshal(b, &c); err != nil {
+				llmWarnf("jqlm: ignoring invalid config file %s: %v", p, err)
+				continue
+			}
+			configFile = &c
+			break
+		}
+	})
+	return configFile
+}
+
 // ------------------------------------------------------------------ decider --
 
 type llmDecision struct {
@@ -120,9 +169,13 @@ func getDecider() (*llmDecider, error) {
 }
 
 func newLLMDecider() (*llmDecider, error) {
+	cfg := llmLoadConfig()
 	name := llmFlagProvider
 	if !llmFlagProviderSet {
 		name = os.Getenv("JQLM_PROVIDER")
+	}
+	if name == "" && cfg != nil {
+		name = cfg.Provider
 	}
 	if name == "" {
 		name = "openai"
@@ -147,6 +200,9 @@ func newLLMDecider() (*llmDecider, error) {
 	if !llmFlagModelSet {
 		model = os.Getenv("JQLM_MODEL")
 	}
+	if model == "" && cfg != nil {
+		model = cfg.Model
+	}
 	if model == "" {
 		model = spec.defaultModel
 	}
@@ -155,6 +211,9 @@ func newLLMDecider() (*llmDecider, error) {
 	}
 
 	baseURL := os.Getenv("JQLM_BASE_URL")
+	if baseURL == "" && cfg != nil {
+		baseURL = cfg.BaseURL
+	}
 	if baseURL == "" {
 		baseURL = spec.defaultBaseURL
 	}
@@ -163,28 +222,40 @@ func newLLMDecider() (*llmDecider, error) {
 	}
 
 	mode := spec.defaultMode
-	switch ms := os.Getenv("JQLM_MODE"); ms {
-	case "":
-	case "json":
-		mode = instructor.ModeJSON
-	case "json-schema":
-		mode = instructor.ModeJSONSchema
-	case "tool":
-		mode = instructor.ModeToolCall
-	default:
-		return nil, fmt.Errorf("invalid JQLM_MODE %q (known: json, json-schema, tool)", ms)
+	modeStr := os.Getenv("JQLM_MODE")
+	if modeStr == "" && cfg != nil {
+		modeStr = cfg.Mode
+	}
+	if modeStr != "" {
+		switch modeStr {
+		case "json":
+			mode = instructor.ModeJSON
+		case "json-schema":
+			mode = instructor.ModeJSONSchema
+		case "tool":
+			mode = instructor.ModeToolCall
+		default:
+			return nil, fmt.Errorf("invalid JQLM_MODE %q (known: json, json-schema, tool)", modeStr)
+		}
 	}
 
 	timeout := spec.defaultTimeout
-	if ts := os.Getenv("JQLM_TIMEOUT"); ts != "" {
-		d, err := time.ParseDuration(ts)
+	timeoutStr := os.Getenv("JQLM_TIMEOUT")
+	if timeoutStr == "" && cfg != nil {
+		timeoutStr = cfg.Timeout
+	}
+	if timeoutStr != "" {
+		d, err := time.ParseDuration(timeoutStr)
 		if err != nil {
-			return nil, fmt.Errorf("invalid JQLM_TIMEOUT %q: %v", ts, err)
+			return nil, fmt.Errorf("invalid JQLM_TIMEOUT %q: %v", timeoutStr, err)
 		}
 		timeout = d
 	}
 
 	maxItemBytes := 0
+	if cfg != nil && cfg.MaxItemBytes != nil {
+		maxItemBytes = *cfg.MaxItemBytes
+	}
 	if ms := os.Getenv("JQLM_MAX_ITEM_BYTES"); ms != "" {
 		n, err := strconv.Atoi(ms)
 		if err != nil || n < 0 {
@@ -194,16 +265,19 @@ func newLLMDecider() (*llmDecider, error) {
 	}
 
 	retries := 3
+	if cfg != nil && cfg.MaxRetries != nil && *cfg.MaxRetries > 0 {
+		retries = *cfg.MaxRetries
+	}
 	if rs := os.Getenv("JQLM_MAX_RETRIES"); rs != "" {
 		if n, err := strconv.Atoi(rs); err == nil && n > 0 {
 			retries = n
 		}
 	}
 
-	cfg := openai.DefaultConfig(key)
-	cfg.BaseURL = baseURL
+	clientCfg := openai.DefaultConfig(key)
+	clientCfg.BaseURL = baseURL
 	cli := instructor.FromOpenAI(
-		openai.NewClientWithConfig(cfg),
+		openai.NewClientWithConfig(clientCfg),
 		instructor.WithMode(mode),
 		instructor.WithMaxRetries(2),
 	)

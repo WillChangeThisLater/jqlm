@@ -13,6 +13,24 @@ applies; there are just two extra builtins:
      '.[] | select(llm_select(. ; "only keep negative reviews"))'
 ```
 
+## Configuration file
+
+jqlm reads `~/.config/jqlm/config.yaml` (or `$XDG_CONFIG_HOME/jqlm/config.yaml`)
+for defaults. Every key is optional; precedence is **flags > env vars > config
+file > per-provider defaults**:
+
+```yaml
+# ~/.config/jqlm/config.yaml
+provider: openrouter
+model: z-ai/glm-5.3-flash
+timeout: 30s
+concurrency: 10
+# base_url: http://localhost:8080/v1   # for openai-compat / llama
+# mode: json                           # json | json-schema | tool
+# max_retries: 3
+# max_item_bytes: 1000000              # client-side oversize guard (bytes)
+```
+
 ## LLM builtins
 
 - `llm_select(value; prompt)` → boolean. Sends one request per item to an

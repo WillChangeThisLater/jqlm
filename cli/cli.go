@@ -155,14 +155,22 @@ Examples:
 		cli.outputCompact, cli.outputIndent, cli.outputTab, cli.outputYAML =
 		opts.OutputRaw, opts.OutputRaw0, opts.OutputJoin,
 		opts.OutputCompact, opts.OutputIndent, opts.OutputTab, opts.OutputYAML
-	cli.llmConcurrency = 1
+	cli.llmConcurrency = 0 // 0 = unset; flags > env > config file > 1
 	llmFlagProvider, llmFlagModel = opts.LLMProvider, opts.LLMModel
 	llmFlagProviderSet, llmFlagModelSet = opts.LLMProvider != "", opts.LLMModel != ""
 	if opts.LLMConcurrency != nil {
 		cli.llmConcurrency = *opts.LLMConcurrency
-	} else if s := os.Getenv("JQLM_CONCURRENCY"); s != "" {
-		if n, err := strconv.Atoi(s); err == nil && n > 0 {
-			cli.llmConcurrency = n
+	}
+	if cli.llmConcurrency == 0 {
+		if s := os.Getenv("JQLM_CONCURRENCY"); s != "" {
+			if n, err := strconv.Atoi(s); err == nil && n > 0 {
+				cli.llmConcurrency = n
+			}
+		}
+	}
+	if cli.llmConcurrency == 0 {
+		if c := llmLoadConfig(); c != nil && c.Concurrency != nil && *c.Concurrency > 0 {
+			cli.llmConcurrency = *c.Concurrency
 		}
 	}
 	if cli.llmConcurrency < 1 {

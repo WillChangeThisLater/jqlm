@@ -110,6 +110,16 @@ func (cli *cli) processParallel(iter inputIter, code *gojq.Code) error {
 			delete(pending, next)
 			next++
 
+			// print values collected before the error first — halt and
+			// mid-stream errors must not lose already-produced output
+			if !halted {
+				for _, v := range p.vals {
+					if e := cli.printValue(m, v); e != nil {
+						fmt.Fprintf(cli.errStream, "%s: %s\n", name, e)
+						procErr = e
+					}
+				}
+			}
 			if p.err != nil {
 				if e, ok := p.err.(*gojq.HaltError); ok {
 					if v := e.Value(); v != nil {
@@ -129,12 +139,6 @@ func (cli *cli) processParallel(iter inputIter, code *gojq.Code) error {
 				fmt.Fprintf(cli.errStream, "%s: %s\n", name, p.err)
 				procErr = p.err
 				continue
-			}
-			for _, v := range p.vals {
-				if e := cli.printValue(m, v); e != nil {
-					fmt.Fprintf(cli.errStream, "%s: %s\n", name, e)
-					procErr = e
-				}
 			}
 		}
 		if halted {
