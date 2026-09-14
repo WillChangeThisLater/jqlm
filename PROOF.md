@@ -102,6 +102,40 @@ Correct verdicts on all 100 items with both providers. Cost is O(n) calls by
 design (request-per-item, per project decision); per-call latency dominates,
 throughput does not degrade as the input grows.
 
+## 7b. Concurrency: `--llm-concurrency N` — same output, N× faster
+
+Per-item requests are dispatched across a worker pool (gojq's `Code.Run` is
+documented goroutine-safe); results still print in **input order**, so output
+is identical to sequential mode. Requires input as a stream of documents
+(NDJSON), since parallelism is per input value. A judge request now sends
+`temperature: 0` for deterministic verdicts.
+
+```
+# sequential (from §7): 6m52s — 100 calls at ~4.1s each
+$ JQLM_PROVIDER=openrouter JQLM_MODEL=z-ai/glm-5.3-flash \
+  jqlm --llm-concurrency 10 JQLM_TIMEOUT=30s -c \
+  'select(llm_select(. ; "keep only reviews complaining about the food")) | .i' \
+  < big.ndjson | wc -l
+50
+real    1m6s       # 6.3x speedup, zero failures, order preserved
+```
+
+```
+# local llama.cpp: needs server-side parallel slots (llama-server -np 8)
+# and enough VRAM for N concurrent context slots
+$ JQLM_PROVIDER=llama JQLM_MODEL=Qwen3.5-9B-Q8_0.gguf \
+  jqlm --llm-concurrency 8 -c '... | .i' < big.ndjson | wc -l
+50
+real    1m26s      # 4.4x speedup (GPU throughput-bound)
+```
+
+Notes:
+- under parallel load some calls take longer; raise `JQLM_TIMEOUT` accordingly
+  (with the default 15s, 2 of 100 calls timed out and were dropped with
+  warnings — fail-open held, but the run was short 2 items).
+- on a 16GB GPU, `-np 8` requires shrinking the server context (`--ctx-size
+  32768`); 8 slots × 128k ctx does not fit.
+
 ## 8. Graceful failure: pipeline completes when calls fail
 
 A provider outage mid-run (llama-server killed externally after 3 calls) —
@@ -159,9 +193,10 @@ Errors surface on the first actual `llm_*` call (lazy init, like jq's own
 
 ## Known limitations
 
-- Per-item calls are sequential (gojq invokes custom functions synchronously).
-  For 1000s of small items this is minutes, not seconds. The fix (batching)
-  was consciously deferred per project decision.
+- Parallelism (`--llm-concurrency`) is per **input value**: a single large JSON
+  array input is one query run, so `llm_select` calls inside it stay sequential.
+  Feed NDJSON (one document per line) to get the speedup.
+- Under heavy parallelism, per-call latency rises; tune `JQLM_TIMEOUT` up.
 - `llm_judge`'s free-text `reason` is model-quality; treat it as a hint, not
   an audit trail.
 - Extreme inputs to a local llama-server can crash the *server* process (its

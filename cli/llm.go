@@ -232,7 +232,7 @@ func (d *llmDecider) decide(value, prompt any) (keep bool, reason string, err er
 		atomic.AddInt64(&d.calls, 1)
 		ctx, cancel := context.WithTimeout(context.Background(), d.timeout)
 		_, err = d.client.CreateChatCompletion(ctx, openai.ChatCompletionRequest{
-			Model: d.model, Messages: messages,
+			Model: d.model, Messages: messages, Temperature: 0,
 		}, &out)
 		cancel()
 		if err == nil {

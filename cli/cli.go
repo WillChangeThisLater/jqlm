@@ -12,6 +12,7 @@ import (
 	"github.com/mattn/go-isatty"
 
 	"github.com/itchyny/gojq"
+	"strconv"
 )
 
 const name = "jqlm"
@@ -51,34 +52,37 @@ type cli struct {
 
 	outputYAMLSeparator bool
 	exitCodeError       error
+
+	llmConcurrency int
 }
 
 type flagopts struct {
-	OutputRaw     bool              `short:"r" long:"raw-output" description:"output raw strings"`
-	OutputRaw0    bool              `long:"raw-output0" description:"implies -r with NUL character delimiter"`
-	OutputJoin    bool              `short:"j" long:"join-output" description:"implies -r with no newline delimiter"`
-	OutputCompact bool              `short:"c" long:"compact-output" description:"output without pretty-printing"`
-	OutputIndent  *int              `long:"indent" args:"number" description:"number of spaces for indentation"`
-	OutputTab     bool              `long:"tab" description:"use tabs for indentation"`
-	OutputYAML    bool              `long:"yaml-output" description:"output in YAML format"`
-	OutputColor   bool              `short:"C" long:"color-output" description:"output with colors even if piped"`
-	OutputMono    bool              `short:"M" long:"monochrome-output" description:"output without colors"`
-	InputNull     bool              `short:"n" long:"null-input" description:"use null as input value"`
-	InputRaw      bool              `short:"R" long:"raw-input" description:"read input as raw strings"`
-	InputStream   bool              `long:"stream" description:"parse input in stream fashion"`
-	InputYAML     bool              `long:"yaml-input" description:"read input as YAML format"`
-	InputSlurp    bool              `short:"s" long:"slurp" description:"read all inputs into an array"`
-	FromFile      bool              `short:"f" long:"from-file" description:"load query from file"`
-	ModulePaths   []string          `short:"L" long:"library-path" args:"dir" description:"directory to search modules from"`
-	Arg           map[string]string `long:"arg" args:"name value" description:"set a string value to a variable"`
-	ArgJSON       map[string]string `long:"argjson" args:"name value" description:"set a JSON value to a variable"`
-	SlurpFile     map[string]string `long:"slurpfile" args:"name file" description:"set the JSON contents of a file to a variable"`
-	RawFile       map[string]string `long:"rawfile" args:"name file" description:"set the contents of a file to a variable"`
-	Args          []any             `long:"args" positional:"" description:"consume remaining arguments as positional string values"`
-	JSONArgs      []any             `long:"jsonargs" positional:"" description:"consume remaining arguments as positional JSON values"`
-	ExitStatus    bool              `short:"e" long:"exit-status" description:"exit 1 when the last value is false or null"`
-	Version       bool              `short:"v" long:"version" description:"display version information"`
-	Help          bool              `short:"h" long:"help" description:"display this help information"`
+	OutputRaw      bool              `short:"r" long:"raw-output" description:"output raw strings"`
+	OutputRaw0     bool              `long:"raw-output0" description:"implies -r with NUL character delimiter"`
+	OutputJoin     bool              `short:"j" long:"join-output" description:"implies -r with no newline delimiter"`
+	OutputCompact  bool              `short:"c" long:"compact-output" description:"output without pretty-printing"`
+	OutputIndent   *int              `long:"indent" args:"number" description:"number of spaces for indentation"`
+	OutputTab      bool              `long:"tab" description:"use tabs for indentation"`
+	OutputYAML     bool              `long:"yaml-output" description:"output in YAML format"`
+	OutputColor    bool              `short:"C" long:"color-output" description:"output with colors even if piped"`
+	OutputMono     bool              `short:"M" long:"monochrome-output" description:"output without colors"`
+	InputNull      bool              `short:"n" long:"null-input" description:"use null as input value"`
+	InputRaw       bool              `short:"R" long:"raw-input" description:"read input as raw strings"`
+	InputStream    bool              `long:"stream" description:"parse input in stream fashion"`
+	InputYAML      bool              `long:"yaml-input" description:"read input as YAML format"`
+	InputSlurp     bool              `short:"s" long:"slurp" description:"read all inputs into an array"`
+	FromFile       bool              `short:"f" long:"from-file" description:"load query from file"`
+	ModulePaths    []string          `short:"L" long:"library-path" args:"dir" description:"directory to search modules from"`
+	Arg            map[string]string `long:"arg" args:"name value" description:"set a string value to a variable"`
+	ArgJSON        map[string]string `long:"argjson" args:"name value" description:"set a JSON value to a variable"`
+	SlurpFile      map[string]string `long:"slurpfile" args:"name file" description:"set the JSON contents of a file to a variable"`
+	RawFile        map[string]string `long:"rawfile" args:"name file" description:"set the contents of a file to a variable"`
+	Args           []any             `long:"args" positional:"" description:"consume remaining arguments as positional string values"`
+	JSONArgs       []any             `long:"jsonargs" positional:"" description:"consume remaining arguments as positional JSON values"`
+	ExitStatus     bool              `short:"e" long:"exit-status" description:"exit 1 when the last value is false or null"`
+	LLMConcurrency *int              `long:"llm-concurrency" args:"n" description:"process input values in parallel (results still print in input order)"`
+	Version        bool              `short:"v" long:"version" description:"display version information"`
+	Help           bool              `short:"h" long:"help" description:"display this help information"`
 }
 
 var addDefaultModulePaths = true
@@ -127,6 +131,17 @@ Usage:
 		cli.outputCompact, cli.outputIndent, cli.outputTab, cli.outputYAML =
 		opts.OutputRaw, opts.OutputRaw0, opts.OutputJoin,
 		opts.OutputCompact, opts.OutputIndent, opts.OutputTab, opts.OutputYAML
+	cli.llmConcurrency = 1
+	if opts.LLMConcurrency != nil {
+		cli.llmConcurrency = *opts.LLMConcurrency
+	} else if s := os.Getenv("JQLM_CONCURRENCY"); s != "" {
+		if n, err := strconv.Atoi(s); err == nil && n > 0 {
+			cli.llmConcurrency = n
+		}
+	}
+	if cli.llmConcurrency < 1 {
+		cli.llmConcurrency = 1
+	}
 	defer func(x bool) { noColor = x }(noColor)
 	if opts.OutputColor || opts.OutputMono {
 		noColor = opts.OutputMono
@@ -324,6 +339,9 @@ func (cli *cli) createInputIter(args []string) (iter inputIter) {
 }
 
 func (cli *cli) process(iter inputIter, code *gojq.Code) error {
+	if cli.llmConcurrency > 1 {
+		return cli.processParallel(iter, code)
+	}
 	var err error
 	for {
 		v, ok := iter.Next()
@@ -369,27 +387,37 @@ func (cli *cli) printValues(iter gojq.Iter) error {
 		if err, ok := v.(error); ok {
 			return err
 		}
-		if cli.outputYAMLSeparator {
-			cli.outStream.Write([]byte("---\n"))
-		} else {
-			cli.outputYAMLSeparator = cli.outputYAML
-		}
-		if err := m.marshal(v, cli.outStream); err != nil {
+		if err := cli.printValue(m, v); err != nil {
 			return err
 		}
-		if cli.exitCodeError != nil {
-			if v == nil || v == false {
-				cli.exitCodeError = &exitCodeError{exitCodeFalsyErr}
-			} else {
-				cli.exitCodeError = &exitCodeError{exitCodeOK}
-			}
+	}
+	return nil
+}
+
+// printValue writes one output value. Shared by sequential and parallel
+// processing so both paths have identical output semantics (including -e
+// exit-code tracking and YAML separators).
+func (cli *cli) printValue(m marshaler, v any) error {
+	if cli.outputYAMLSeparator {
+		cli.outStream.Write([]byte("---\n"))
+	} else {
+		cli.outputYAMLSeparator = cli.outputYAML
+	}
+	if err := m.marshal(v, cli.outStream); err != nil {
+		return err
+	}
+	if cli.exitCodeError != nil {
+		if v == nil || v == false {
+			cli.exitCodeError = &exitCodeError{exitCodeFalsyErr}
+		} else {
+			cli.exitCodeError = &exitCodeError{exitCodeOK}
 		}
-		if !cli.outputYAML {
-			if cli.outputRaw0 {
-				cli.outStream.Write([]byte{'\x00'})
-			} else if !cli.outputJoin {
-				cli.outStream.Write([]byte{'\n'})
-			}
+	}
+	if !cli.outputYAML {
+		if cli.outputRaw0 {
+			cli.outStream.Write([]byte{'\x00'})
+		} else if !cli.outputJoin {
+			cli.outStream.Write([]byte{'\n'})
 		}
 	}
 	return nil

@@ -30,6 +30,8 @@ Other env: `JQLM_MODEL`, `JQLM_BASE_URL`, `JQLM_MODE` (`json`|`json-schema`|`too
 `JQLM_TIMEOUT` (per-call, default per provider), `JQLM_MAX_RETRIES` (default 3),
 `JQLM_MAX_ITEM_BYTES` (client-side size guard; discard oversized items without
 calling the provider, since some providers silently truncate them).
+CLI flag `--llm-concurrency N` (or env `JQLM_CONCURRENCY`) processes input
+values in parallel while printing results in input order.
 
 See [PROOF.md](PROOF.md) for captured end-to-end runs across providers,
 scaling, and failure modes.
