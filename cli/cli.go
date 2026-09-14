@@ -88,6 +88,7 @@ type flagopts struct {
 	LLMConcurrency *int              `long:"llm-concurrency" args:"n" description:"process input values in parallel (results still print in input order)"`
 	LLMProvider    string            `long:"llm-provider" description:"LLM provider: openai|openrouter|llama|openai-compat (overrides JQLM_PROVIDER)"`
 	LLMModel       string            `long:"llm-model" args:"id" description:"LLM model id (overrides JQLM_MODEL; e.g. gpt-4o-mini, z-ai/glm-5.3-flash, a gguf name)"`
+	LLMShowConfig  bool              `long:"llm-config" description:"print the resolved LLM settings and exit"`
 	Version        bool              `short:"v" long:"version" description:"display version information"`
 	Help           bool              `short:"h" long:"help" description:"display this help information"`
 }
@@ -158,6 +159,7 @@ Examples:
 	cli.llmConcurrency = 0 // 0 = unset; flags > env > config file > 1
 	llmFlagProvider, llmFlagModel = opts.LLMProvider, opts.LLMModel
 	llmFlagProviderSet, llmFlagModelSet = opts.LLMProvider != "", opts.LLMModel != ""
+	llmShowConfig = opts.LLMShowConfig
 	if opts.LLMConcurrency != nil {
 		cli.llmConcurrency = *opts.LLMConcurrency
 	}
@@ -175,6 +177,22 @@ Examples:
 	}
 	if cli.llmConcurrency < 1 {
 		cli.llmConcurrency = 1
+	}
+	if opts.LLMShowConfig {
+		d, err := getDecider()
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(cli.outStream, `provider:        %s
+model:           %s
+mode:            %s
+timeout:         %s
+base_url:        %s
+max_retries:     %d
+max_item_bytes:  %d (0 = no client-side limit)
+concurrency:     %d
+`, d.provider, d.model, d.mode, d.timeout, d.baseURL, d.maxRetries, d.maxItemBytes, cli.llmConcurrency)
+		return nil
 	}
 	defer func(x bool) { noColor = x }(noColor)
 	if opts.OutputColor || opts.OutputMono {

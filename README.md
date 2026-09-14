@@ -13,6 +13,25 @@ applies; there are just two extra builtins:
      '.[] | select(llm_select(. ; "only keep negative reviews"))'
 ```
 
+## Checking your settings
+
+`--llm-config` resolves the full precedence chain (flags > env > config file >
+per-provider defaults) and prints what would actually run:
+
+```sh
+$ jqlm --llm-config
+provider:        openrouter
+model:           z-ai/glm-5.3-flash
+mode:            json_mode
+timeout:         30s
+base_url:        https://openrouter.ai/api/v1
+max_retries:     3
+max_item_bytes:  0 (0 = no client-side limit)
+concurrency:     10
+
+$ jqlm --llm-config --llm-provider llama --llm-model Qwen3.5-9B-Q8_0.gguf  # flags apply here too
+```
+
 ## Configuration file
 
 jqlm reads `~/.config/jqlm/config.yaml` (or `$XDG_CONFIG_HOME/jqlm/config.yaml`)

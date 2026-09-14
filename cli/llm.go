@@ -144,6 +144,8 @@ type llmDecider struct {
 	maxRetries   int
 	timeout      time.Duration
 	maxItemBytes int
+	baseURL      string
+	mode         string
 	calls        int64
 	failures     int64
 }
@@ -161,6 +163,7 @@ var (
 	llmFlagModel       string
 	llmFlagProviderSet bool
 	llmFlagModelSet    bool
+	llmShowConfig      bool // --llm-config: print settings, suppress the startup warning
 )
 
 func getDecider() (*llmDecider, error) {
@@ -281,8 +284,10 @@ func newLLMDecider() (*llmDecider, error) {
 		instructor.WithMode(mode),
 		instructor.WithMaxRetries(2),
 	)
-	llmWarnf("jqlm: provider=%s model=%s mode=%s timeout=%s maxItemBytes=%d", spec.name, model, mode, timeout, maxItemBytes)
-	return &llmDecider{client: cli, model: model, provider: spec.name, maxRetries: retries, timeout: timeout, maxItemBytes: maxItemBytes}, nil
+	if !llmShowConfig {
+		llmWarnf("jqlm: provider=%s model=%s mode=%s timeout=%s maxItemBytes=%d", spec.name, model, mode, timeout, maxItemBytes)
+	}
+	return &llmDecider{client: cli, model: model, provider: spec.name, maxRetries: retries, timeout: timeout, maxItemBytes: maxItemBytes, baseURL: baseURL, mode: string(mode)}, nil
 }
 
 func (d *llmDecider) decide(value, prompt any) (keep bool, reason string, err error) {
