@@ -97,6 +97,12 @@ type llmConfig struct {
 	MaxRetries   *int   `yaml:"max_retries"`
 	MaxItemBytes *int   `yaml:"max_item_bytes"`
 	Concurrency  *int   `yaml:"concurrency"`
+	// jev_* keys configure the Jev decision-model builtins (cli/jev.go).
+	JevBaseURL      string   `yaml:"jev_base_url"`
+	JevModel        string   `yaml:"jev_model"`
+	JevThreshold    *float64 `yaml:"jev_threshold"`
+	JevTimeout      string   `yaml:"jev_timeout"`
+	JevMaxItemBytes *int     `yaml:"jev_max_item_bytes"`
 }
 
 var (
@@ -167,6 +173,12 @@ var (
 	llmFlagProviderSet bool
 	llmFlagModelSet    bool
 	llmShowConfig      bool // --llm-config: print settings, suppress the startup warning
+
+	// --fail-closed: exit nonzero if any llm/jev call failed (exitCodeFailedCalls).
+	llmFailClosed bool
+	// --mark-failed: emit each discarded item to stderr as NDJSON so failed
+	// runs are recoverable, not just flagged.
+	llmMarkFailed bool
 )
 
 func getDecider() (*llmDecider, error) {
@@ -318,6 +330,7 @@ func (d *llmDecider) decide(value, prompt any) (keep bool, reason string, err er
 		atomic.AddInt64(&d.calls, 1)
 		atomic.AddInt64(&d.failures, 1)
 		llmWarnf("jqlm: item is %d bytes (JQLM_MAX_ITEM_BYTES=%d), DISCARDED without calling provider", len(b), d.maxItemBytes)
+		markFailedItem("llm", value, "item too large (client-side limit)")
 		return false, "item too large (client-side limit)", nil
 	}
 	messages := []openai.ChatCompletionMessage{
@@ -354,6 +367,7 @@ func (d *llmDecider) decide(value, prompt any) (keep bool, reason string, err er
 	}
 	atomic.AddInt64(&d.failures, 1)
 	llmWarnf("jqlm: decide failed, item DISCARDED: %s", llmErrorSummary(lastErr))
+	markFailedItem("llm", value, llmErrorSummary(lastErr))
 	return false, llmErrorSummary(lastErr), nil
 }
 
@@ -392,7 +406,68 @@ func llmErrorSummary(err error) string {
 }
 
 func llmWarnf(format string, args ...any) {
-	fmt.Fprintf(os.Stderr, "warning: "+format+"\n", args...)
+	llmWarnOnce(fmt.Sprintf(format, args...))
+}
+
+// Warning coalescing: providers fail 124 times the same way, and 124
+// identical lines bury the rest of stderr (observed live on a 401 run).
+// Print the first occurrence immediately, count the rest, and flush the
+// counts at end of run via warnFlushSuppressed.
+var (
+	warnMu       sync.Mutex
+	warnSeen     = map[string]bool{}
+	warnRepeated = map[string]int{}
+)
+
+func llmWarnOnce(msg string) {
+	warnMu.Lock()
+	if warnSeen[msg] {
+		warnRepeated[msg]++
+		warnMu.Unlock()
+		return
+	}
+	warnSeen[msg] = true
+	warnMu.Unlock()
+	fmt.Fprintln(os.Stderr, "warning: "+msg)
+}
+
+// warnFlushSuppressed prints per-message counts for warnings that repeated.
+// Called once at end of run (after the llm/jev failure summaries).
+func warnFlushSuppressed() {
+	warnMu.Lock()
+	defer warnMu.Unlock()
+	for msg, n := range warnRepeated {
+		if n > 0 {
+			fmt.Fprintf(os.Stderr, "warning: (seen %dx) %s\n", n+1, msg)
+		}
+	}
+	warnSeen = map[string]bool{}
+	warnRepeated = map[string]int{}
+}
+
+// markFailedItem implements --mark-failed: one NDJSON record per discarded
+// item on stderr, so a fail-open run's losses can be replayed or counted.
+func markFailedItem(builtin string, value any, reason string) {
+	if !llmMarkFailed {
+		return
+	}
+	b, err := json.Marshal(value)
+	if err != nil {
+		b = []byte(`"<unmarshalable item>"`)
+	}
+	fmt.Fprintf(os.Stderr, "{\"builtin\":%q,\"error\":%q,\"item\":%s}\n", builtin, reason, b)
+}
+
+// totalFailedCalls sums llm and jev failure counters for --fail-closed.
+func totalFailedCalls() int64 {
+	var n int64
+	if llmShared != nil {
+		n += atomic.LoadInt64(&llmShared.failures)
+	}
+	if jevShared != nil {
+		n += atomic.LoadInt64(&jevShared.failures)
+	}
+	return n
 }
 
 // ---------------------------------------------------------------- builtins --

@@ -1,25 +1,70 @@
 ---
 name: jqlm
-description: Use jqlm (a jq fork with llm_select/llm_judge builtins) for semantic filtering of JSON streams — especially HAR network-capture recon of websites (authorized pen-testing, understanding how a site operates), log triage, and large-scale "which of these items matter" questions.
+description: Use jqlm (a jq fork with llm_select/llm_judge/jev_select/jev_judge/jev_classify builtins) for semantic filtering of JSON streams — especially HAR network-capture recon of websites (authorized pen-testing, understanding how a site operates), log triage, and large-scale "which of these items matter" questions.
 ---
 
 # jqlm — semantic filtering for JSON (HAR recon and friends)
 
-`jqlm` is a fork of gojq (bug-for-bug jq in Go) with two LLM builtins. Repo:
+`jqlm` is a fork of gojq (bug-for-bug jq in Go) with LLM builtins. Repo:
 `~/repos/jqlm` (github: WillChangeThisLater/jqlm). Binary on PATH via
-`~/.local/bin/jqlm`. Read `~/repos/jqlm/README.md` and `PROOF.md` for details.
+`~/.local/bin/jqlm` → `~/repos/jqlm/jqlm`. Read `~/repos/jqlm/README.md` and
+`PROOF.md` for details.
 
 ## The builtins
 
 ```jq
 llm_select(value; "prompt")   # -> bool: true = keep. Use inside select().
 llm_judge(value; "prompt")    # -> {keep: bool, reason: string}
+
+jev_select(value; "prompt")   # -> bool (Jev noul yes-probability >= --jev-threshold, default 0.5)
+jev_judge(value; "prompt")    # -> {keep: bool, noul: number}  (raw probability for cascades)
+jev_classify(value; "prompt"; ["opt|desc", ...])  # -> string: chosen option, null on failure
 ```
 
-One HTTP request per item to the configured provider. **Failed calls fail
-open: the item is DISCARDED with a stderr warning.** Always glance at stderr
-for `N of M llm call(s) failed` — an outage silently shrinks output otherwise
-(by design; the warning is the tell).
+One HTTP request per item. **Failed calls fail open: the item is DISCARDED
+with a stderr warning.** Always glance at stderr for `N of M llm/jev call(s)
+failed` — an outage silently shrinks output otherwise (by design; the warning
+is the tell). For pipelines use `--fail-closed` (exit 6 on any failure) and
+`--mark-failed` (discarded items emitted to stderr as NDJSON, recoverable).
+Duplicate warnings are coalesced (`(seen Nx)` summary at end of run).
+**Live-audit lesson (2026-10-07 bbc.com HAR run):** an empty-looking result
+appeared TWICE — once from a broken key (401s, all 124 items silently
+discarded) and once as a genuinely clean filter. Never trust an empty result
+without checking for the failure summary; prefer `--fail-closed` in scripts.
+
+### llm vs jev — DEFAULT TO JEV, escalate to llm
+
+**Reach for `jev_select`/`jev_classify` first.** They are ~70–500ms per item
+vs seconds for an LLM judge and 5–50× cheaper, with calibrated probabilities
+and zero hallucinated output. For the bulk of jqlm's use cases — "which of
+these items matter?" filtering, routing, tagging — jev is the right tool and
+the cost difference compounds fast on large streams (HAR recon, log triage).
+
+Escalate to `llm_select`/`llm_judge` only when:
+
+- the criteria are **nuanced or compositional** ("keep only if the reviewer
+  actually ATE the food and the complaint is about seasoning, not temperature")
+  — freeform judge prompts handle this; jev questions should stay short and
+  single-decision;
+- the corpus is **adversarial** (prompt-injection risk, items engineered to
+  look positive): an LLM judge's `reason` field doubles as tamper evidence,
+  while jev gives you only a number;
+- you need the verdict **explained** in the output (`llm_judge` returns it).
+
+Quick test: if your prompt fits in one sentence with a clear yes/no or
+pick-one answer space, use jev. If you're about to write a paragraph of
+criteria, use llm.
+
+- `jev_classify(value; "prompt"; ["opt|desc", ...])` has **no llm equivalent**
+  (a Choice question with per-option probabilities) — for multi-way decisions
+  it's the only one-call option, and it's the cheapest.
+- jev state passes strings/objects/arrays natively; option args use
+  `"name|description"`. NOTE: options MUST be one array argument — gojq calls
+  custom functions once per combination of argument values, so comma-separated
+  options would fire one API call per option.
+- Cascade pattern for high-stakes filters: `jev_judge` low-confidence items
+  fall through to `llm_judge` (the AY Automate benchmark matched frontier-LLM
+  accuracy at ~27% of its cost this way). Threshold tune on real data first.
 
 ## Config / settings
 
@@ -33,11 +78,26 @@ for `N of M llm call(s) failed` — an outage silently shrinks output otherwise
   --ctx-size 32768` for parallel slots; VRAM limits slots on a 16GB GPU).
 - API keys: `OPENAI_API_KEY` / `OPENROUTER_API_KEY` env (llama needs none).
 
+### Jev config
+
+- Key: `JEV_API_KEY` in `~/.zshrc-sensitive` (verified working 2026-10-07).
+- Defaults: `api.typesafe.ai/v1`, model `jev-latest`, threshold 0.5, 15s timeout.
+- Flags `--jev-model` / `--jev-threshold <0..1>`; `--jev-config` prints resolved
+  settings (key redacted). Config-file keys `jev_model`, `jev_threshold`, etc.
+- `--llm-concurrency N` applies to jev calls too (6 items ran in 0.22s at N=6).
+- Guardrail learned the hard way: after editing `~/repos/jqlm`, REBUILD the
+  binary (`go build -o jqlm ./cmd/gojq`) — the PATH binary is a symlink to the
+  repo and goes stale silently (a session lost an hour to "jev_select/2 is not
+  defined" from a Sep 14 binary).
+
 ## Critical usage rules
 
 1. **Parallelism is per input value.** A single big JSON array is ONE input =
    sequential. Pre-split: `jq -c '.[]' big.json | jqlm --llm-concurrency N
    '...'`. Output order is preserved; `jq -s` to rewrap.
+1b. **In audit/pipeline scripts, always add `--fail-closed`.** Fail open means
+   a provider outage is indistinguishable from "no matches" — exit 6 is the
+   tell. Add `--mark-failed` if discarded items matter.
 2. Big single documents (e.g. an entire 3MB HAR as one value) are handled
    fine but filtered sequentially — slice before filtering when speed matters.
 3. Providers may **silently truncate** oversized items (OpenRouter does).
@@ -101,6 +161,6 @@ with `| wc -l` to sanity-check fail-open drops.
 
 ## Provenance
 
-Skill created 2026-09-14 alongside jqlm's development (fork of gojq v0.12.19)
+Skill created 2026-09-14 alongside jqlm's development (fork of gojq v0.12.19; jev builtins added 2026-10-07)
 after live HAR recon and bulk-filtering sessions proved the workflow. Helper
 script `scripts/har_capture.py` was battle-tested on southwest.com.

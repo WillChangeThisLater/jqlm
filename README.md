@@ -76,8 +76,72 @@ vars (flags > env > provider default).
 CLI flag `--llm-concurrency N` (or env `JQLM_CONCURRENCY`) processes input
 values in parallel while printing results in input order.
 
+**Failure modes for pipelines** (apply to both the llm and jev builtins):
+
+- Default is **fail open**: a failed call discards the item with a stderr
+  warning and the run continues. End-of-run summaries report
+  `N of M call(s) failed`; identical warnings are coalesced
+  (`(seen Nx)` at the end of the run) so a dead provider can't flood stderr.
+- `--fail-closed` — exit with code **6** if any call failed. Use this in audit
+  and ETL pipelines: with fail open, "the filter found nothing" and "the
+  filter was down" are indistinguishable unless you watch stderr.
+- `--mark-failed` — each discarded item is emitted to stderr as NDJSON
+  (`{"builtin": "jev_select", "error": "...", "item": ...}`) so failed runs
+  are recoverable, not just flagged.
+
 See [PROOF.md](PROOF.md) for captured end-to-end runs across providers,
 scaling, and failure modes.
+
+## Jev builtins
+
+jqlm can also use [Jev](https://thejevai.com) — TypeSafe AI's "System One"
+decision model. Jev never generates text: it takes your item as *state* and
+typed questions, and returns calibrated probabilities in ~70–500 ms at a
+fraction of LLM cost. Zero hallucinations by construction (outputs are
+pre-defined values), but note: a decision model's verdict is still driven by
+the input text, so for adversarial corpora or highly nuanced criteria the
+`llm_*` path remains the safer judge — both paths are first-class, pick per
+task.
+
+- `jev_select(value; prompt)` → boolean. One "noul" (yes/no) question per
+  item; `true` = keep when the returned yes-probability ≥ threshold.
+  Failed calls **fail open** exactly like `llm_select`.
+- `jev_judge(value; prompt)` → `{keep: boolean, noul: number}`. Same, but
+  exposes the raw yes-probability so you can build cascades and thresholds.
+- `jev_classify(value; prompt; options)` → string. One "choice" question;
+  `options` is an array, each element `"name"` or `"name|description"`.
+  Returns the chosen option name, or `null` on failure. Use this for routing,
+  tagging, and multi-way decisions `llm_select` can't express cleanly.
+
+```sh
+ $ cat reviews.json | JEV_API_KEY=... jqlm --jev-threshold 0.7 \
+     'select(jev_select(. ; "keep reviews where the reviewer really disliked the food"))'
+
+ $ cat tickets.json | JEV_API_KEY=... jqlm \
+     'jev_classify(. ; "route this ticket"; ["billing|invoices", "technical|bugs", "account|logins"])'
+```
+
+### Jev configuration
+
+Precedence: flags (`--jev-model`, `--jev-threshold`) > env > config file
+(`jev_model`, `jev_threshold`, `jev_base_url`, `jev_timeout`,
+`jev_max_item_bytes` keys) > defaults. `--jev-config` prints the resolved
+settings (key redacted).
+
+| env | default | notes |
+|---|---|---|
+| `JEV_API_KEY` | — (required) | from thejevai.com; never logged |
+| `JEV_BASE_URL` | `https://api.typesafe.ai/v1` | production API |
+| `JEV_MODEL` | `jev-latest` | see also `jev-preview` (GET /v1/models) |
+| `JEV_THRESHOLD` | `0.5` | keep cutoff for `jev_select`/`jev_judge` |
+| `JEV_TIMEOUT` | `15s` | per-call |
+| `JEV_MAX_RETRIES` | `3` | retries on 429/5xx/network errors |
+| `JEV_MAX_ITEM_BYTES` | `1048576` | client-side oversize guard; 0 disables |
+
+`--llm-concurrency N` applies to jev calls too: input values are processed in
+parallel while results print in input order. Each jev call carries one item
+(one question), so per-item cost is a few hundred input tokens; batching
+multiple items per request is a possible future optimization.
 
 ---
 

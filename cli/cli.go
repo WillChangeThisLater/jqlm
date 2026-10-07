@@ -28,6 +28,7 @@ const (
 	exitCodeCompileErr
 	exitCodeNoValueErr
 	exitCodeDefaultErr
+	exitCodeFailedCalls // --fail-closed: at least one llm/jev call failed
 )
 
 type cli struct {
@@ -89,6 +90,11 @@ type flagopts struct {
 	LLMProvider    string            `long:"llm-provider" description:"LLM provider: openai|openrouter|llama|openai-compat (overrides JQLM_PROVIDER)"`
 	LLMModel       string            `long:"llm-model" args:"id" description:"LLM model id (overrides JQLM_MODEL; e.g. gpt-4o-mini, z-ai/glm-5.3-flash, a gguf name)"`
 	LLMShowConfig  bool              `long:"llm-config" description:"print the resolved LLM settings and exit"`
+	JEVModel       string            `long:"jev-model" args:"id" description:"Jev model id (overrides JEV_MODEL; default jev-latest)"`
+	JEVThreshold   string            `long:"jev-threshold" args:"p" description:"keep threshold for jev_select/jev_judge, in [0,1] (overrides JEV_THRESHOLD; default 0.5)"`
+	JEVShowConfig  bool              `long:"jev-config" description:"print the resolved Jev settings and exit"`
+	FailClosed     bool              `long:"fail-closed" description:"exit with code 6 if any llm/jev call failed (default: fail open, item discarded with a warning)"`
+	MarkFailed     bool              `long:"mark-failed" description:"on call failure, emit the discarded item as NDJSON ({builtin, error, item}) on stderr"`
 	Version        bool              `short:"v" long:"version" description:"display version information"`
 	Help           bool              `short:"h" long:"help" description:"display this help information"`
 }
@@ -96,7 +102,9 @@ type flagopts struct {
 var addDefaultModulePaths = true
 
 func (cli *cli) run(args []string) int {
+	defer warnFlushSuppressed() // runs last: flush after the failure summaries
 	defer llmSummaryWarn()
+	defer jevSummaryWarn()
 	if err := cli.runInternal(args); err != nil {
 		if _, ok := err.(interface{ isEmptyError() }); !ok {
 			fmt.Fprintf(cli.errStream, "%s: %s\n", name, err)
@@ -105,6 +113,12 @@ func (cli *cli) run(args []string) int {
 			return err.ExitCode()
 		}
 		return exitCodeDefaultErr
+	}
+	if llmFailClosed {
+		if n := totalFailedCalls(); n > 0 {
+			fmt.Fprintf(cli.errStream, "%s: %d llm/jev call(s) failed and items were discarded (--fail-closed)\n", name, n)
+			return exitCodeFailedCalls
+		}
 	}
 	return exitCodeOK
 }
@@ -136,12 +150,23 @@ LLM configuration (--llm-provider/--llm-model flags, or env):
   JQLM_MAX_RETRIES   retries per llm call (default 3)
   JQLM_MAX_ITEM_BYTES  skip items larger than this many bytes without calling the provider
 
+Jev configuration (--jev-model/--jev-threshold flags, or env):
+  JEV_API_KEY        Jev API key (required for jev_* builtins)
+  JEV_BASE_URL       default: https://api.typesafe.ai/v1
+  JEV_MODEL          default: jev-latest (see also: jev-preview)
+  JEV_THRESHOLD      keep threshold for jev_select/jev_judge (default 0.5)
+  JEV_TIMEOUT        per-call timeout, e.g. 15s
+  JEV_MAX_RETRIES    retries per jev call (default 3)
+  JEV_MAX_ITEM_BYTES   skip items larger than this many bytes (default 1MB)
+
 Examples:
   %% cat reviews.json | %[1]s 'select(llm_select(. ; "keep the negative reviews"))'
   %% JQLM_PROVIDER=openrouter JQLM_MODEL=z-ai/glm-5.3-flash cat reviews.json | %[1]s --llm-concurrency 10 'select(llm_select(. ; "..."))'
   %% JQLM_PROVIDER=llama JQLM_MODEL=Qwen3.5-9B-Q8_0.gguf cat reviews.json | %[1]s 'select(llm_select(. ; "..."))'
+  %% JEV_API_KEY=... cat reviews.json | %[1]s --jev-threshold 0.7 'select(jev_select(. ; "keep the negative reviews"))'
+  %% cat tickets.json | %[1]s 'jev_classify(. ; "route this ticket"; ["billing|invoices", "technical|bugs", "account|logins"])'
   API keys: OPENAI_API_KEY (openai), OPENROUTER_API_KEY (openrouter),
-  JQLM_API_KEY (openai-compat); llama needs no key.
+  JQLM_API_KEY (openai-compat), JEV_API_KEY (jev); llama needs no key.
 
 `,
 			name, version, revision, runtime.Version())
@@ -160,6 +185,26 @@ Examples:
 	llmFlagProvider, llmFlagModel = opts.LLMProvider, opts.LLMModel
 	llmFlagProviderSet, llmFlagModelSet = opts.LLMProvider != "", opts.LLMModel != ""
 	llmShowConfig = opts.LLMShowConfig
+	jevFlagModel, jevFlagModelSet = opts.JEVModel, opts.JEVModel != ""
+	jevFlagThreshold = opts.JEVThreshold
+	jevShowConfig = opts.JEVShowConfig
+	llmFailClosed = opts.FailClosed
+	llmMarkFailed = opts.MarkFailed
+	if opts.JEVShowConfig {
+		d, err := getJevDecider()
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(cli.outStream, `jev model:       %s
+jev threshold:   %.2f
+jev timeout:     %s
+jev base_url:    %s
+jev max_retries: %d
+jev max_item_bytes: %d (0 = no client-side limit)
+jev api_key:     %s
+`, d.model, d.threshold, d.timeout, d.baseURL, d.maxRetries, d.maxItemBytes, jevRedactKey(d.apiKey))
+		return nil
+	}
 	if opts.LLMConcurrency != nil {
 		cli.llmConcurrency = *opts.LLMConcurrency
 	}
@@ -314,6 +359,9 @@ concurrency:     %d
 		gojq.WithFunction("stderr", 0, 0, cli.funcStderr),
 		gojq.WithFunction("llm_select", 2, 2, llmSelectFunc),
 		gojq.WithFunction("llm_judge", 2, 2, llmJudgeFunc),
+		gojq.WithFunction("jev_select", 2, 2, jevSelectFunc),
+		gojq.WithFunction("jev_judge", 2, 2, jevJudgeFunc),
+		gojq.WithFunction("jev_classify", 3, 3, jevClassifyFunc),
 		gojq.WithFunction("input_filename", 0, 0,
 			func(iter inputIter) func(any, []any) any {
 				return func(any, []any) any {
