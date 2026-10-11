@@ -26,7 +26,9 @@
 //	JEV_THRESHOLD        keep threshold for jev_select/jev_judge (default 0.5)
 //	JEV_TIMEOUT          per-call timeout, Go duration (default 15s)
 //	JEV_MAX_RETRIES      retries per call (default 3)
-//	JEV_MAX_ITEM_BYTES   client-side oversize guard (default 1MB, 0 = off)
+//	JEV_MAX_ITEM_BYTES   chunk budget (default 64KB, 0 = off). Jev's real
+//	                     context window is much smaller than 1MB: a 76KB doc
+//	                     passed but 296KB returned max_tokens_exceeded.
 //
 // API shape (verified against https://api.typesafe.ai/openapi.json, 2026-10):
 //
@@ -52,9 +54,11 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
+	"unicode/utf8"
 	"sync/atomic"
 	"time"
 )
@@ -66,7 +70,7 @@ const (
 	jevDefaultModel    = "jev-latest"
 	jevDefaultTimeout  = 15 * time.Second
 	jevDefaultRetries  = 3
-	jevDefaultMaxBytes = 1 << 20
+	jevDefaultMaxBytes = 64 << 10
 )
 
 type jevConfig struct {
@@ -236,6 +240,17 @@ func jevState(value any) any {
 	}
 }
 
+// jevInputError checks whether the value is an input-decode error (invalid
+// JSON/YAML input that reached the query as a value instead of aborting).
+// Judging the error's text as if it were the document silently poisons
+// results, so these must fail loudly.
+func jevInputError(value any) error {
+	if _, ok := value.(error); ok {
+		return fmt.Errorf("input is not a document but an error value (%v) — fix the input JSON", value)
+	}
+	return nil
+}
+
 type jevQuestion struct {
 	Type         string `json:"type"`
 	Instructions string `json:"instructions,omitempty"`
@@ -340,51 +355,223 @@ func jevTrimBody(data []byte) string {
 	return s
 }
 
+// chunkStates splits an oversized value into pieces that each fit the
+// maxItemBytes budget (marshaled), so classification can OR-aggregate over
+// chunks instead of dropping the item. Strings split at paragraph → line →
+// rune boundaries; arrays batch elements; objects batch top-level entries
+// (each batch entry is a single-key map, preserving key context). Returns the
+// chunk list and whether chunking actually happened.
+func (d *jevDecider) chunkStates(value any) ([]any, bool, error) {
+	state := jevState(value)
+	if d.maxItemBytes <= 0 {
+		return []any{state}, false, nil
+	}
+	b, err := json.Marshal(state)
+	if err != nil {
+		return nil, false, err
+	}
+	if len(b) <= d.maxItemBytes {
+		return []any{state}, false, nil
+	}
+	var chunks []any
+	switch v := state.(type) {
+	case string:
+		chunks = chunkString(v, d.maxItemBytes)
+	case []any:
+		chunks, err = batchElements(v, d.maxItemBytes)
+		if err != nil {
+			return nil, false, err
+		}
+	case map[string]any:
+		chunks, err = batchObject(v, d.maxItemBytes)
+		if err != nil {
+			return nil, false, err
+		}
+	default:
+		// scalars can't realistically exceed the limit; fall through to one
+		// state and let the normal path handle (or the API reject) it
+		return []any{state}, false, nil
+	}
+	if len(chunks) <= 1 {
+		return []any{state}, false, nil
+	}
+	llmWarnf("jqlm: item is %d bytes (JEV_MAX_ITEM_BYTES=%d), chunked into %d pieces for classification", len(b), d.maxItemBytes, len(chunks))
+	return chunks, true, nil
+}
+
+// chunkString splits s into pieces whose json.Marshal form fits budget bytes,
+// preferring paragraph breaks, then line breaks, then hard rune cuts.
+func chunkString(s string, budget int) []any {
+	// JSON-encoding overhead (quotes + escaping) can expand control chars 6x;
+	// use a conservative inner budget (half of budget) and verify with a real
+	// marshal per piece in the caller.
+	inner := budget / 2
+	if inner > len(s) {
+		inner = len(s)
+	}
+	var out []any
+	for len(s) > 0 {
+		cut := len(s)
+		if cut > inner {
+			cut = inner
+			// prefer the last paragraph break, then line break, then space
+			for _, sep := range []string{"\n\n", "\n", " "} {
+				if i := strings.LastIndex(s[:cut], sep); i > 0 {
+					cut = i + len(sep)
+					break
+				}
+			}
+			// never split a UTF-8 rune
+			for cut > 0 && !utf8.RuneStart(s[cut]) {
+				cut--
+			}
+		}
+		piece := strings.TrimRight(s[:cut], "\n")
+		if piece != "" {
+			out = append(out, piece)
+		}
+		s = s[cut:]
+	}
+	return out
+}
+
+// batchElements groups array elements into batches whose marshaled form fits
+// budget bytes.
+func batchElements(elems []any, budget int) ([]any, error) {
+	var batches []any
+	var cur []any
+	curLen := 2 // "[]"
+	flush := func() {
+		if len(cur) > 0 {
+			batches = append(batches, cur)
+			cur, curLen = nil, 2
+		}
+	}
+	for _, el := range elems {
+		eb, err := json.Marshal(el)
+		if err != nil {
+			return nil, err
+		}
+		if len(eb)+1 > budget { // single element too big: split string states inside
+			flush()
+			if s, ok := el.(string); ok {
+				for _, piece := range chunkString(s, budget) {
+					batches = append(batches, []any{piece})
+				}
+			} else {
+				batches = append(batches, []any{el}) // let the API reject it
+			}
+			continue
+		}
+		if curLen+len(eb)+1 > budget {
+			flush()
+		}
+		cur = append(cur, el)
+		curLen += len(eb) + 1
+	}
+	flush()
+	return batches, nil
+}
+
+// batchObject groups top-level object entries into batch objects whose
+// marshaled form fits budget bytes. Each entry is emitted as a single-key
+// object so the chunk keeps its key context.
+func batchObject(obj map[string]any, budget int) ([]any, error) {
+	keys := make([]string, 0, len(obj))
+	for k := range obj {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	var batches []any
+	cur := map[string]any{}
+	curLen := 2
+	flush := func() {
+		if len(cur) > 0 {
+			batches = append(batches, cur)
+			cur = map[string]any{}
+			curLen = 2
+		}
+	}
+	for _, k := range keys {
+		entry := map[string]any{k: obj[k]}
+		eb, err := json.Marshal(entry)
+		if err != nil {
+			return nil, err
+		}
+		if len(eb) > budget { // single entry too big: split string values inside
+			flush()
+			if s, ok := obj[k].(string); ok {
+				for _, piece := range chunkString(s, budget) {
+					batches = append(batches, map[string]any{k: piece})
+				}
+			} else {
+				batches = append(batches, entry) // let the API reject it
+			}
+			continue
+		}
+		if curLen+len(eb)+1 > budget {
+			flush()
+		}
+		for kk, vv := range entry {
+			cur[kk] = vv
+		}
+		curLen += len(eb) + 1
+	}
+	flush()
+	return batches, nil
+}
+
 // decideNoul asks one yes/no question about the value. On failure it fails
 // open (keep=false) and returns a non-empty reason; the error is never
-// propagated as a query error, mirroring llm_* semantics.
+// propagated as a query error, mirroring llm_* semantics. Oversized items are
+// auto-chunked; keep = any chunk's noul >= threshold (max noul reported).
 func (d *jevDecider) decideNoul(value any, prompt any) (keep bool, noul float64, reason string) {
+	if err := jevInputError(value); err != nil {
+		return false, 0, err.Error()
+	}
 	promptStr, ok := prompt.(string)
 	if !ok {
 		return false, 0, "jev prompt must be a string"
 	}
-	b, err := json.Marshal(value)
+	chunks, _, err := d.chunkStates(value)
 	if err != nil {
 		return false, 0, "marshal error"
 	}
-	if d.maxItemBytes > 0 && len(b) > d.maxItemBytes {
-		atomic.AddInt64(&d.calls, 1)
-		atomic.AddInt64(&d.failures, 1)
-		llmWarnf("jqlm: item is %d bytes (JEV_MAX_ITEM_BYTES=%d), DISCARDED without calling provider", len(b), d.maxItemBytes)
-		markFailedItem("jev_select", value, "item too large (client-side limit)")
-		return false, 0, "item too large (client-side limit)"
+	maxNoul := 0.0
+	for _, chunk := range chunks {
+		answers, err := d.jevCall(jevRequest{
+			Model: d.model,
+			State: chunk,
+			Questions: map[string]jevQuestion{
+				"keep": {Type: "noul", Instructions: promptStr},
+			},
+		})
+		if err != nil {
+			atomic.AddInt64(&d.failures, 1)
+			llmWarnf("jqlm: jev_select failed, item DISCARDED: %v", err)
+			markFailedItem("jev_select", value, err.Error())
+			return false, 0, err.Error()
+		}
+		ans, ok := answers["keep"]
+		if !ok || ans.Noul == nil {
+			atomic.AddInt64(&d.failures, 1)
+			llmWarnf("jqlm: jev response missing noul verdict, item DISCARDED")
+			return false, 0, "response omitted required field 'noul'"
+		}
+		if *ans.Noul > maxNoul {
+			maxNoul = *ans.Noul
+		}
 	}
-	answers, err := d.jevCall(jevRequest{
-		Model: d.model,
-		State: jevState(value),
-		Questions: map[string]jevQuestion{
-			"keep": {Type: "noul", Instructions: promptStr},
-		},
-	})
-	if err != nil {
-		atomic.AddInt64(&d.failures, 1)
-		llmWarnf("jqlm: jev_select failed, item DISCARDED: %v", err)
-		markFailedItem("jev_select", value, err.Error())
-		return false, 0, err.Error()
-	}
-	ans, ok := answers["keep"]
-	if !ok || ans.Noul == nil {
-		atomic.AddInt64(&d.failures, 1)
-		llmWarnf("jqlm: jev response missing noul verdict, item DISCARDED")
-		return false, 0, "response omitted required field 'noul'"
-	}
-	noul = *ans.Noul
+	noul = maxNoul
 	return noul >= d.threshold, noul, ""
 }
 
 // decideChoice asks one choice question and returns the chosen option name.
 // On failure it returns "" (falsy in jq) plus a non-empty reason.
 func (d *jevDecider) decideChoice(value any, prompt any, options []any) (choice string, confidence float64, reason string) {
+	if err := jevInputError(value); err != nil {
+		return "", 0, err.Error()
+	}
 	promptStr, ok := prompt.(string)
 	if !ok {
 		return "", 0, "jev prompt must be a string"
@@ -408,40 +595,69 @@ func (d *jevDecider) decideChoice(value any, prompt any, options []any) (choice 
 			criteria[s] = ""
 		}
 	}
-	b, err := json.Marshal(value)
+	// Oversized items are auto-chunked; the verdict is OR-aggregated: per
+	// option, the max probability seen in any chunk wins, argmax picks the
+	// class (so "matches in any part of the document" is preserved).
+	chunks, _, err := d.chunkStates(value)
 	if err != nil {
 		return "", 0, "marshal error"
 	}
-	if d.maxItemBytes > 0 && len(b) > d.maxItemBytes {
-		atomic.AddInt64(&d.calls, 1)
-		atomic.AddInt64(&d.failures, 1)
-		llmWarnf("jqlm: item is %d bytes (JEV_MAX_ITEM_BYTES=%d), DISCARDED without calling provider", len(b), d.maxItemBytes)
-		markFailedItem("jev_classify", value, "item too large (client-side limit)")
-		return "", 0, "item too large (client-side limit)"
+	bestProb := map[string]float64{}
+	for _, chunk := range chunks {
+		answers, err := d.jevCall(jevRequest{
+			Model: d.model,
+			State: chunk,
+			Questions: map[string]jevQuestion{
+				"class": {Type: "choice", Instructions: promptStr, Criteria: criteria},
+			},
+		})
+		if err != nil {
+			atomic.AddInt64(&d.failures, 1)
+			llmWarnf("jqlm: jev_classify failed, returning null: %v", err)
+			markFailedItem("jev_classify", value, err.Error())
+			return "", 0, err.Error()
+		}
+		ans, ok := answers["class"]
+		if !ok || ans.Choice == nil {
+			atomic.AddInt64(&d.failures, 1)
+			llmWarnf("jqlm: jev response missing choice verdict, returning null")
+			return "", 0, "response omitted required field 'choice'"
+		}
+		// record the chosen option's evidence; prefer the full probability
+		// distribution when the API provides one so runner-up options aren't lost
+		if len(ans.Probabilities) > 0 {
+			for opt, p := range ans.Probabilities {
+				if p > bestProb[opt] {
+					bestProb[opt] = p
+				}
+			}
+		} else {
+			p := 1.0
+			if ans.Confidence != nil {
+				p = *ans.Confidence
+			}
+			if p > bestProb[*ans.Choice] {
+				bestProb[*ans.Choice] = p
+			}
+		}
 	}
-	answers, err := d.jevCall(jevRequest{
-		Model: d.model,
-		State: jevState(value),
-		Questions: map[string]jevQuestion{
-			"class": {Type: "choice", Instructions: promptStr, Criteria: criteria},
-		},
-	})
-	if err != nil {
-		atomic.AddInt64(&d.failures, 1)
-		llmWarnf("jqlm: jev_classify failed, returning null: %v", err)
-		markFailedItem("jev_classify", value, err.Error())
-		return "", 0, err.Error()
+	// argmax over accumulated per-option max probabilities (deterministic:
+	// ties broken by option name)
+	choice, confidence = "", 0.0
+	opts := make([]string, 0, len(bestProb))
+	for opt := range bestProb {
+		opts = append(opts, opt)
 	}
-	ans, ok := answers["class"]
-	if !ok || ans.Choice == nil {
-		atomic.AddInt64(&d.failures, 1)
-		llmWarnf("jqlm: jev response missing choice verdict, returning null")
-		return "", 0, "response omitted required field 'choice'"
+	sort.Strings(opts)
+	for _, opt := range opts {
+		if bestProb[opt] > confidence {
+			choice, confidence = opt, bestProb[opt]
+		}
 	}
-	if ans.Confidence != nil {
-		confidence = *ans.Confidence
+	if choice == "" {
+		return "", 0, "no chunk produced a verdict"
 	}
-	return *ans.Choice, confidence, ""
+	return choice, confidence, ""
 }
 
 // ---------------------------------------------------------------- builtins --

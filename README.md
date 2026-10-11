@@ -70,7 +70,8 @@ concurrency: 10
 Other env: `JQLM_MODEL`, `JQLM_BASE_URL`, `JQLM_MODE` (`json`|`json-schema`|`tool`),
 `JQLM_TIMEOUT` (per-call, default per provider), `JQLM_MAX_RETRIES` (default 3),
 `JQLM_MAX_ITEM_BYTES` (client-side size guard; discard oversized items without
-calling the provider, since some providers silently truncate them).
+calling the provider, since some providers silently truncate them — llm_*
+builtins only; the jev_* builtins auto-chunk instead, see below).
 CLI flags `--llm-provider` and `--llm-model` override the corresponding env
 vars (flags > env > provider default).
 CLI flag `--llm-concurrency N` (or env `JQLM_CONCURRENCY`) processes input
@@ -136,7 +137,27 @@ settings (key redacted).
 | `JEV_THRESHOLD` | `0.5` | keep cutoff for `jev_select`/`jev_judge` |
 | `JEV_TIMEOUT` | `15s` | per-call |
 | `JEV_MAX_RETRIES` | `3` | retries on 429/5xx/network errors |
-| `JEV_MAX_ITEM_BYTES` | `1048576` | client-side oversize guard; 0 disables |
+| `JEV_MAX_ITEM_BYTES` | `65536` | chunk budget: oversized items are auto-chunked to this size (marshaled bytes) and verdicts OR-aggregated; 0 disables both chunking and the guard. Calibrated to jev's real context window (a 76KB doc passed unchunked; 296KB returned max_tokens_exceeded) |
+
+### Auto-chunking (jev_* builtins)
+
+Items whose marshaled form exceeds `JEV_MAX_ITEM_BYTES` are no longer
+discarded — they are split into pieces that fit the budget and judged per
+chunk:
+
+- strings split at paragraph → line → rune boundaries
+- arrays are batched into element groups that fit
+- objects are batched into single-key entry groups (key context preserved)
+- `jev_select`/`jev_judge`: keep = **max** chunk noul ≥ threshold (true if any
+  chunk matches)
+- `jev_classify`: per-option **max** probability across chunks, argmax wins
+- any chunk failing after retries discards the whole item (unchanged
+  fail-open semantics; `--fail-closed` still applies)
+
+Chunking is a *recall* filter: it can find a needle anywhere in the document
+but cannot judge cross-chunk relationships. Chunk boundaries may split
+context; overlapping queries or a full read (e.g. via an agent) suit nuanced
+criteria better.
 
 `--llm-concurrency N` applies to jev calls too: input values are processed in
 parallel while results print in input order. Each jev call carries one item

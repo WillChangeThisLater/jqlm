@@ -75,7 +75,7 @@ func TestJevConfigDefaults(t *testing.T) {
 	}
 	if c.BaseURL != "https://api.typesafe.ai/v1" || c.Model != "jev-latest" ||
 		c.Threshold != 0.5 || c.Timeout != 15*time.Second || c.MaxRetries != 3 ||
-		c.MaxItemBytes != 1<<20 {
+		c.MaxItemBytes != 64<<10 {
 		t.Errorf("unexpected defaults: %+v", c)
 	}
 }

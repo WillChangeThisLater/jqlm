@@ -307,6 +307,9 @@ func newLLMDecider() (*llmDecider, error) {
 }
 
 func (d *llmDecider) decide(value, prompt any) (keep bool, reason string, err error) {
+	if ierr := jevInputError(value); ierr != nil {
+		return false, ierr.Error(), nil
+	}
 	b, err := json.Marshal(value)
 	if err != nil {
 		return false, "marshal error", nil

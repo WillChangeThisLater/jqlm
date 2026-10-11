@@ -157,7 +157,7 @@ Jev configuration (--jev-model/--jev-threshold flags, or env):
   JEV_THRESHOLD      keep threshold for jev_select/jev_judge (default 0.5)
   JEV_TIMEOUT        per-call timeout, e.g. 15s
   JEV_MAX_RETRIES    retries per jev call (default 3)
-  JEV_MAX_ITEM_BYTES   skip items larger than this many bytes (default 1MB)
+  JEV_MAX_ITEM_BYTES   skip items larger than this many bytes (default 64KB)
 
 Examples:
   %% cat reviews.json | %[1]s 'select(llm_select(. ; "keep the negative reviews"))'

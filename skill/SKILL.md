@@ -19,6 +19,12 @@ llm_judge(value; "prompt")    # -> {keep: bool, reason: string}
 jev_select(value; "prompt")   # -> bool (Jev noul yes-probability >= --jev-threshold, default 0.5)
 jev_judge(value; "prompt")    # -> {keep: bool, noul: number}  (raw probability for cascades)
 jev_classify(value; "prompt"; ["opt|desc", ...])  # -> string: chosen option, null on failure
+
+# Auto-chunking (2026-10-10): items over JEV_MAX_ITEM_BYTES are split into
+# budget-sized chunks and verdicts OR-aggregated (max noul / max per-option
+# probability) instead of being discarded. Strings split on paragraph → line
+# → rune boundaries; arrays batch elements; objects batch single-key entries.
+# Chunking = recall filter; cross-chunk criteria still need a full read.
 ```
 
 One HTTP request per item. **Failed calls fail open: the item is DISCARDED
@@ -102,7 +108,15 @@ criteria, use llm.
    fine but filtered sequentially — slice before filtering when speed matters.
 3. Providers may **silently truncate** oversized items (OpenRouter does).
    Set `JQLM_MAX_ITEM_BYTES` (env or config) to discard explicitly with a
-   warning instead of trusting a truncated verdict.
+   warning instead of trusting a truncated verdict — llm_* builtins only.
+   The jev_* builtins instead auto-chunk oversized items (see builtins
+   section above).
+3b. **Invalid JSON input poisons results (fixed 2026-10-10).** A raw-text
+   stdin line used to reach jev_*/llm_* as a parse-error *value*, which was
+   silently judged as if it were the document (noul 0.02-0.04 garbage
+   verdicts, no failure warning). Now guarded: such items fail loudly with
+   a reason and count toward the failure summary. When piping non-JSON
+   text, wrap it first: `jq -Rs . file.txt | jqlm ...`.
 4. Judge requests run at temperature 0 (deterministic).
 5. `-r` for raw strings, `-c` for compact — same flags as jq.
 
