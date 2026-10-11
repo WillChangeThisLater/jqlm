@@ -115,3 +115,26 @@ func TestUnlimitedNoChunk(t *testing.T) {
 		t.Fatalf("maxItemBytes=0 must disable chunking: chunked=%v err=%v", chunked, err)
 	}
 }
+
+func TestChunkStringEscapeHeavyFitsBudget(t *testing.T) {
+	// BUG regression (grill run -04): escape expansion (control chars 6x,
+	// quotes 2x) previously produced pieces marshaling far over budget.
+	d := &jevDecider{maxItemBytes: 1000}
+	// control chars expand 6x under JSON escaping
+	s := strings.Repeat("ab\x01\x02\x03\n\n", 40) + strings.Repeat("tail \"quotes\" ", 60)
+	chunks, chunked, err := d.chunkStates(s)
+	if err != nil || !chunked {
+		t.Fatalf("expected chunking, chunked=%v err=%v", chunked, err)
+	}
+	reassembled := ""
+	for _, c := range chunks {
+		b, _ := json.Marshal(c)
+		if len(b) > 1000 {
+			t.Fatalf("chunk marshals to %d bytes, budget 1000 (escape expansion not verified)", len(b))
+		}
+		reassembled += c.(string)
+	}
+	if !strings.Contains(reassembled, "tail \"quotes\"") {
+		t.Fatal("content lost while shrinking")
+	}
+}

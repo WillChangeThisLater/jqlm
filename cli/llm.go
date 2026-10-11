@@ -26,8 +26,10 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"errors"
 	"fmt"
 	"net/http"
@@ -295,6 +297,11 @@ func newLLMDecider() (*llmDecider, error) {
 
 	clientCfg := openai.DefaultConfig(key)
 	clientCfg.BaseURL = baseURL
+	// The request struct's `temperature,omitempty` silently drops Temperature 0
+	// (go-openai omitempty on float32), so providers run at their default
+	// temperature — defeating the deterministic-at-temp-0 contract. Fix on the
+	// wire: inject "temperature": 0 into chat-completion bodies that lack it.
+	clientCfg.HTTPClient = &http.Client{Transport: &temperatureZeroTransport{next: http.DefaultTransport}}
 	cli := instructor.FromOpenAI(
 		openai.NewClientWithConfig(clientCfg),
 		instructor.WithMode(mode),
@@ -515,4 +522,33 @@ func llmSummaryWarn() {
 			llmWarnf("jqlm: %d of %d llm call(s) failed; those items were DISCARDED", failures, calls)
 		}
 	}
+}
+
+// temperatureZeroTransport injects "temperature": 0 into OpenAI-compatible
+// chat-completion request bodies that lack the key. Needed because
+// openai.ChatCompletionRequest declares temperature with omitempty, so an
+// explicit 0 (the deterministic-sampling contract) never reaches the wire.
+type temperatureZeroTransport struct {
+	next http.RoundTripper
+}
+
+func (t *temperatureZeroTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	if req.Body != nil && strings.Contains(req.URL.Path, "chat/completions") {
+		if body, err := io.ReadAll(req.Body); err == nil {
+			req.Body.Close()
+			var m map[string]json.RawMessage
+			if json.Unmarshal(body, &m) == nil {
+				if _, present := m["temperature"]; !present {
+					m["temperature"] = json.RawMessage("0")
+					if fixed, ferr := json.Marshal(m); ferr == nil {
+						body = fixed
+					}
+				}
+			}
+			req.Body = io.NopCloser(bytes.NewReader(body))
+			req.ContentLength = int64(len(body))
+			req.Header.Set("Content-Length", fmt.Sprint(len(body)))
+		}
+	}
+	return t.next.RoundTrip(req)
 }

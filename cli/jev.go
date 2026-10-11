@@ -427,6 +427,34 @@ func chunkString(s string, budget int) []any {
 			}
 		}
 		piece := strings.TrimRight(s[:cut], "\n")
+		// verify the marshaled piece actually fits the budget: escape-heavy
+		// content (control chars 6x, quotes/backslash/tab 2x) can expand far
+		// beyond its byte length (BUG 2026-10-10: unverified pieces produced
+		// chunks 3x over budget, defeating chunking). Shrink until it fits.
+		for {
+			m, merr := json.Marshal(piece)
+			if merr == nil && len(m) <= budget {
+				break
+			}
+			if cut <= 1 {
+				piece = "" // single unmarshalable byte: drop it rather than loop
+				break
+			}
+			cut = cut * budget / len(m)
+			if cut < 1 {
+				cut = 1
+			}
+			for cut > 0 && !utf8.RuneStart(s[cut]) {
+				cut--
+			}
+			if cut == 0 { // rune trim ate the whole piece: force progress
+				cut = 1
+				for cut < len(s) && !utf8.RuneStart(s[cut]) {
+					cut++
+				}
+			}
+			piece = strings.TrimRight(s[:cut], "\n")
+		}
 		if piece != "" {
 			out = append(out, piece)
 		}
