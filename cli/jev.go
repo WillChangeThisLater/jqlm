@@ -387,6 +387,9 @@ func (d *jevDecider) chunkStates(value any) ([]any, bool, error) {
 		if err != nil {
 			return nil, false, err
 		}
+		if chunks == nil { // no valid batching at this budget: keep unchunked
+			return []any{state}, false, nil
+		}
 	default:
 		// scalars can't realistically exceed the limit; fall through to one
 		// state and let the normal path handle (or the API reject) it
@@ -402,9 +405,16 @@ func (d *jevDecider) chunkStates(value any) ([]any, bool, error) {
 // chunkString splits s into pieces whose json.Marshal form fits budget bytes,
 // preferring paragraph breaks, then line breaks, then hard rune cuts.
 func chunkString(s string, budget int) []any {
+	// Below 8 bytes even a single marshaled rune (min 2 for quotes + 1 for a
+	// char; 6 for an escaped or astral rune) cannot fit — return the string
+	// unchunked and let the caller/API handle the oversize rather than loop
+	// forever (grill verify run ad92: hangs at budgets 1–7).
+	if budget < 8 {
+		return []any{s}
+	}
 	// JSON-encoding overhead (quotes + escaping) can expand control chars 6x;
 	// use a conservative inner budget (half of budget) and verify with a real
-	// marshal per piece in the caller.
+	// marshal per piece below.
 	inner := budget / 2
 	if inner > len(s) {
 		inner = len(s)
@@ -430,8 +440,15 @@ func chunkString(s string, budget int) []any {
 		// verify the marshaled piece actually fits the budget: escape-heavy
 		// content (control chars 6x, quotes/backslash/tab 2x) can expand far
 		// beyond its byte length (BUG 2026-10-10: unverified pieces produced
-		// chunks 3x over budget, defeating chunking). Shrink until it fits.
-		for {
+		// chunks 3x over budget, defeating chunking). Shrink monotonically:
+		// proportional guessing alone can oscillate because escape expansion
+		// is non-monotonic in cut (grill verify run ad92 hangs), so cap
+		// iterations and force a strict decrease.
+		for iter := 0; ; iter++ {
+			if iter > 64 { // belt-and-braces: never hang, whatever the content
+				piece = ""
+				break
+			}
 			m, merr := json.Marshal(piece)
 			if merr == nil && len(m) <= budget {
 				break
@@ -440,18 +457,25 @@ func chunkString(s string, budget int) []any {
 				piece = "" // single unmarshalable byte: drop it rather than loop
 				break
 			}
-			cut = cut * budget / len(m)
-			if cut < 1 {
-				cut = 1
+			prev := cut
+			if merr == nil {
+				cut = cut * budget / len(m)
+			}
+			if cut < 1 || cut >= prev {
+				cut = prev - 1 // force strict progress
 			}
 			for cut > 0 && !utf8.RuneStart(s[cut]) {
 				cut--
 			}
 			if cut == 0 { // rune trim ate the whole piece: force progress
 				cut = 1
-				for cut < len(s) && !utf8.RuneStart(s[cut]) {
+				for cut < prev && !utf8.RuneStart(s[cut]) {
 					cut++
 				}
+			}
+			if cut >= prev { // still no progress (pathological): drop the piece
+				piece = ""
+				break
 			}
 			piece = strings.TrimRight(s[:cut], "\n")
 		}
@@ -480,14 +504,17 @@ func batchElements(elems []any, budget int) ([]any, error) {
 		if err != nil {
 			return nil, err
 		}
-		if len(eb)+1 > budget { // single element too big: split string states inside
+		if len(eb)+2 > budget { // lone element needs the 2 array-wrapper bytes too
 			flush()
 			if s, ok := el.(string); ok {
-				for _, piece := range chunkString(s, budget) {
+				// pieces get wrapped in []any{piece}: reserve the 2 wrapper bytes
+				for _, piece := range chunkString(s, budget-2) {
 					batches = append(batches, []any{piece})
 				}
 			} else {
-				batches = append(batches, []any{el}) // let the API reject it
+				// unsplittable and too big even alone — emit alone; the API
+				// rejects it and the fail-open path reports the discard
+				batches = append(batches, []any{el})
 			}
 			continue
 		}
@@ -527,15 +554,18 @@ func batchObject(obj map[string]any, budget int) ([]any, error) {
 			return nil, err
 		}
 		if len(eb) > budget { // single entry too big: split string values inside
-			flush()
-			if s, ok := obj[k].(string); ok {
-				for _, piece := range chunkString(s, budget) {
+			// pieces get wrapped as {"k":piece}: reserve key + structural bytes
+			if s, ok := obj[k].(string); ok && budget-len(k)-7 >= 8 {
+				flush()
+				for _, piece := range chunkString(s, budget-len(k)-7) {
 					batches = append(batches, map[string]any{k: piece})
 				}
-			} else {
-				batches = append(batches, entry) // let the API reject it
+				continue
 			}
-			continue
+			// key too long to split at this budget (or unsplittable value):
+			// no valid batching exists — signal the caller to fall back to the
+			// unchunked item and let the API reject it there (fail-open)
+			return nil, nil
 		}
 		if curLen+len(eb)+1 > budget {
 			flush()
